@@ -1,0 +1,24 @@
+//
+//  Python.xcconfig
+//  PyObfusc
+//
+//  Created by muken on 2025/12/1.
+//
+
+// Configuration settings file format documentation can be found at:
+// https://developer.apple.com/documentation/xcode/adding-a-build-configuration-file-to-your-project
+
+FIXED_RUNTIME_PATH = "$(SRCROOT)/PyObfusc/source/mk_runtime.c"
+GCC_PREPROCESSOR_DEFINITIONS = $(inherited) FIXED_RUNTIME_PATH='${FIXED_RUNTIME_PATH}'
+//...................................................................................//
+FRAMEWORK_SEARCH_PATHS = $(inherited) /Library/Frameworks
+
+LIBRARY_SEARCH_PATHS = $(inherited) \
+    "$(PROJECT_DIR)/OpenSSL/openssl-mac/lib"
+
+HEADER_SEARCH_PATHS = $(inherited) \
+    "/Library/Frameworks/Python.framework/Versions/3.11/include/python3.11" \
+    "$(SRCROOT)/PyObfusc/OpenSSL/openssl-mac/include" \
+
+OTHER_LDFLAGS = $(inherited) -framework Python  -undefined dynamic_lookup -lcrypto
+//....................................................................................//
