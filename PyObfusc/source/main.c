@@ -22,7 +22,7 @@
 #include <openssl/err.h>
 
 static const char *fixed_runtime_path = FIXED_RUNTIME_PATH;
-static const char *version = "v0.1.0";
+static const char *version = "v0.1.1";
 
 // WARNING: This is an example key for demonstration only.
 // DO NOT use this key in production!

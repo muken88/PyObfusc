@@ -303,7 +303,6 @@
 				);
 				LIBRARY_SEARCH_PATHS = (
 					"$(inherited)",
-					"$(PROJECT_DIR)/PyObfusc/OpenSSL/openssl-linux/lib64",
 					"$(PROJECT_DIR)/PyObfusc/OpenSSL/openssl-mac/lib",
 				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -324,7 +323,6 @@
 				);
 				LIBRARY_SEARCH_PATHS = (
 					"$(inherited)",
-					"$(PROJECT_DIR)/PyObfusc/OpenSSL/openssl-linux/lib64",
 					"$(PROJECT_DIR)/PyObfusc/OpenSSL/openssl-mac/lib",
 				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
