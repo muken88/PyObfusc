@@ -8,8 +8,9 @@
 // Configuration settings file format documentation can be found at:
 // https://developer.apple.com/documentation/xcode/adding-a-build-configuration-file-to-your-project
 
+VERSION = "v0.1.2"
 FIXED_RUNTIME_PATH = "$(SRCROOT)/PyObfusc/source/mk_runtime.c"
-GCC_PREPROCESSOR_DEFINITIONS = $(inherited) FIXED_RUNTIME_PATH='${FIXED_RUNTIME_PATH}'
+GCC_PREPROCESSOR_DEFINITIONS = $(inherited) VERSION='${VERSION}' FIXED_RUNTIME_PATH='${FIXED_RUNTIME_PATH}'
 //...................................................................................//
 FRAMEWORK_SEARCH_PATHS = $(inherited) /Library/Frameworks
 

@@ -22,7 +22,7 @@
 #include <openssl/err.h>
 
 static const char *fixed_runtime_path = FIXED_RUNTIME_PATH;
-static const char *version = "v0.1.1";
+static const char *version = VERSION;
 
 // WARNING: This is an example key for demonstration only.
 // DO NOT use this key in production!
@@ -346,100 +346,83 @@ int main(int argc, const char * argv[]) {
         mkdir_p(dist_dir);
     }
 
-    StringSet parent_dirs;
-    set_init(&parent_dirs);
-    for (size_t i = 0; i < py_files.count; ++i) {
-        char *parent = get_parent_dir_of_file(py_files.items[i]);
-        set_add(&parent_dirs, parent);
-        free(parent);
-    }
+    // share mk_runtime.so
+    char *mk_runtime_dir = NULL;
+    size_t len = strlen(dist_parent) + strlen("/mk_runtime") + 1;
+    mk_runtime_dir = malloc(len);
+    snprintf(mk_runtime_dir, len, "%s/mk_runtime", dist_parent);
 
-    for (size_t i = 0; i < parent_dirs.count; ++i) {
-        const char *rel_parent = parent_dirs.items[i];
+    char *so_path = malloc(strlen(mk_runtime_dir) + strlen("/mk_runtime.so") + 1);
+    snprintf(so_path, strlen(mk_runtime_dir) + strlen("/mk_runtime.so") + 1, "%s/mk_runtime.so", mk_runtime_dir);
 
-        size_t mk_runtime_dir_len = strlen(dist_dir) + 1;
-        if (strlen(rel_parent) > 0) mk_runtime_dir_len += strlen(rel_parent) + 1;
-        mk_runtime_dir_len += strlen("/mk_runtime");
-        char *mk_runtime_dir = (char *)malloc(mk_runtime_dir_len);
-        if (strlen(rel_parent) == 0) {
-            snprintf(mk_runtime_dir, mk_runtime_dir_len, "%s/mk_runtime", dist_dir);
-        } else {
-            snprintf(mk_runtime_dir, mk_runtime_dir_len, "%s/%s/mk_runtime", dist_dir, rel_parent);
+    if (!file_exists(so_path)) {
+        mkdir_p(mk_runtime_dir);
+
+        char *runtime_path = strdup(fixed_runtime_path);
+        char *dir_name = dirname(runtime_path);
+        char *runtime_dir = strdup(dir_name);
+        dir_name = dirname(runtime_dir);
+        char *openssl_root = strdup(dir_name);
+
+        size_t cmd_len = 512;
+        char *compile_cmd = malloc(cmd_len);
+
+        if (strcmp(platform, "mac") == 0) {
+            snprintf(compile_cmd, cmd_len,
+                "cd \"%s\" && "
+                "clang -shared -fPIC "
+                "-I. "
+                "-I/Library/Frameworks/Python.framework/Versions/3.11/include/python3.11 "
+                "-I\"%s/OpenSSL/openssl-mac/include\" "
+                "-L\"%s/OpenSSL/openssl-mac/lib\" "
+                "-o \"%s/mk_runtime.so\" "
+                "mk_runtime.c "
+                "-lcrypto -undefined dynamic_lookup",
+                runtime_dir,
+                openssl_root,
+                openssl_root,
+                mk_runtime_dir);
+        } else if (strcmp(platform, "linux") == 0) {
+            snprintf(compile_cmd, cmd_len,
+                "/usr/local/bin/docker run --rm "
+                "-v \"%s:/workspace\" "
+                "-v \"%s/OpenSSL/openssl-linux:/openssl:ro\" "
+                "-v \"%s:/output\" "
+                "mk_python3.11_obfuscated_linux_x86_64 "
+                "gcc -shared -fPIC "
+                    "-I/usr/local/include/python3.11 "
+                    "-I/openssl/include "
+                    "-L/openssl/lib "
+                    "-o /output/mk_runtime.so "
+                    "/workspace/mk_runtime.c "
+                    "-lcrypto",
+                runtime_dir,
+                openssl_root,
+                mk_runtime_dir);
         }
-        
-        char *so_path = (char *)malloc(strlen(mk_runtime_dir) + strlen("/mk_runtime.so") + 1);
-        snprintf(so_path, strlen(mk_runtime_dir) + strlen("/mk_runtime.so") + 1, "%s/mk_runtime.so", mk_runtime_dir);
-        
-        if (!file_exists(so_path)) {
-            mkdir_p(mk_runtime_dir);
-            
-            char *runtime_path = strdup(fixed_runtime_path);
-            char *dir_name = dirname(runtime_path);
-            char *runtime_dir = strdup(dir_name);
-            
-            dir_name = dirname(runtime_dir);
-            char *openssl_root = strdup(dir_name);
-            size_t cmd_len = 512;
-            char *compile_cmd = (char *)malloc(cmd_len);
-            
-            if (strcmp(platform, "mac") == 0) {
-                snprintf(compile_cmd, cmd_len,
-                    "cd \"%s\" && "
-                    "clang -shared -fPIC "
-                    "-I. "
-                    "-I/Library/Frameworks/Python.framework/Versions/3.11/include/python3.11 "
-                    "-I\"%s/OpenSSL/openssl-mac/include\" "
-                    "-L\"%s/OpenSSL/openssl-mac/lib\" "
-                    "-o \"%s/mk_runtime.so\" "
-                    "mk_runtime.c "
-                    "-lcrypto -undefined dynamic_lookup",
-                    runtime_dir,
-                    openssl_root,
-                    openssl_root,
-                    mk_runtime_dir);
-            } else if (strcmp(platform, "linux") == 0) {
-                snprintf(compile_cmd, cmd_len,
-                    "/usr/local/bin/docker run --rm "
-                    "-v \"%s:/workspace\" "                           // -v directory where runtime.c
-                    "-v \"%s/OpenSSL/openssl-linux:/openssl:ro\" "    // -v linux OpenSSL
-                    "-v \"%s:/output\" "                              // -v output directory of mk_runtime.so
-                    "mk_python3.11_obfuscated_linux_x86_64 "          // use custom image
-                    "gcc -shared -fPIC "
-                        "-I/usr/local/include/python3.11 "
-                        "-I/openssl/include "
-                        "-L/openssl/lib "
-                        "-o /output/mk_runtime.so "
-                        "/workspace/mk_runtime.c "
-                        "-lcrypto",
-                    runtime_dir,
-                    openssl_root,
-                    mk_runtime_dir);
-            }
-            
-            printf("📦 Compiling mk_runtime.so for: %s\n", mk_runtime_dir);
-            if (run_command(compile_cmd) != 0) {
-                fprintf(stderr, "❌ Failed to compile mk_runtime.so for %s\n", mk_runtime_dir);
-                free(compile_cmd); free(runtime_path);
-                free(runtime_dir); free(openssl_root);
-                continue;
-            }
-            free(compile_cmd); free(runtime_path);
-            free(runtime_dir); free(openssl_root);
-            
-            size_t init_py_len = strlen(mk_runtime_dir) + strlen("/__init__.py") + 1;
-            char *init_py_path = (char *)malloc(init_py_len);
-            snprintf(init_py_path, init_py_len, "%s/__init__.py", mk_runtime_dir);
-            FILE* init_py = fopen(init_py_path, "w");
-            if (init_py) {
-                fputs("from .mk_runtime import __run_protected__\n", init_py);
-                fclose(init_py);
-            }
-            free(init_py_path);
-        }
-        free(so_path);
-        free(mk_runtime_dir);
-    }
 
+        printf("📦 Compiling mk_runtime.so for: %s\n", mk_runtime_dir);
+        if (run_command(compile_cmd) != 0) {
+            fprintf(stderr, "❌ Failed to compile mk_runtime.so\n");
+            free(compile_cmd); free(runtime_path); free(runtime_dir); free(openssl_root);
+            free(so_path); free(mk_runtime_dir);
+            goto cleanup_list;
+        }
+        free(compile_cmd); free(runtime_path); free(runtime_dir); free(openssl_root);
+
+        // Write __init__.py
+        size_t init_py_len = strlen(mk_runtime_dir) + strlen("/__init__.py") + 1;
+        char *init_py_path = malloc(init_py_len);
+        snprintf(init_py_path, init_py_len, "%s/__init__.py", mk_runtime_dir);
+        FILE* init_py = fopen(init_py_path, "w");
+        if (init_py) {
+            fputs("from .mk_runtime import __run_protected__\n", init_py);
+            fclose(init_py);
+        }
+        free(init_py_path);
+    }
+    free(so_path);
+    //
     Py_Initialize();
 
     for (size_t i = 0; i < py_files.count; ++i) {
@@ -685,24 +668,24 @@ int main(int argc, const char * argv[]) {
             continue;
         }
         
-        fprintf(out, "# mk -%s , %s\n", version, time_str);
-        fprintf(out, "from %s import __run_protected__\n", import_path);
-        fprintf(out, "parameter = b'");
-        for (Py_ssize_t j = 0; j < (Py_ssize_t)encrypted_len; j++) {
-            fprintf(out, "\\x%02x", (unsigned char)encrypted_data[j]);
-        }
-        fprintf(out, "'\n");
-        fprintf(out, "__run_protected__(__name__, __file__, parameter)\n");
-        fclose(out);
+        fprintf(out, "# PyObfusc -%s , %s\n", version, time_str);
         // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-        
 //        fprintf(out, "from %s import __run_protected__\n", import_path);
-//        fprintf(out, "__run_protected__(__name__, __file__, b'");
+//        fprintf(out, "parameter = b'");
 //        for (Py_ssize_t j = 0; j < (Py_ssize_t)encrypted_len; j++) {
 //            fprintf(out, "\\x%02x", (unsigned char)encrypted_data[j]);
 //        }
-//        fprintf(out, "')\n");
+//        fprintf(out, "'\n");
+//        fprintf(out, "__run_protected__(__name__, __file__, parameter)\n");
 //        fclose(out);
+        // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+        fprintf(out, "from %s import __run_protected__\n", import_path);
+        fprintf(out, "__run_protected__(__name__, __file__, b'");
+        for (Py_ssize_t j = 0; j < (Py_ssize_t)encrypted_len; j++) {
+            fprintf(out, "\\x%02x", (unsigned char)encrypted_data[j]);
+        }
+        fprintf(out, "')\n");
+        fclose(out);
         // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
         free(encrypted_data);
         free(input_file);
@@ -715,7 +698,9 @@ int main(int argc, const char * argv[]) {
 
 cleanup_list:
     list_free(&py_files);
-    set_free(&parent_dirs);
+    if (mk_runtime_dir) {
+        free(mk_runtime_dir);
+    }
     if (!is_single_file) {
         free(abs_input);
         if (dist_dir != dist_parent) {
