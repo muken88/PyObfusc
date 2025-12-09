@@ -1,2 +1,2 @@
 # PyObfusc
-An open-source tool used on a Mac supports Python code encryption for both Linux and Mac systems.
+A command-line tool on a Mac, using it to encrypt and run Python code on Linux and Mac systems.
