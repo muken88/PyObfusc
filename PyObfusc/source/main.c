@@ -100,8 +100,7 @@ void list_free(StringList *list) {
     free(list->items);
 }
 
-// collect .py files
-void collect_py_files(const char *root, const char *current, StringList *files) {
+void collect_files(const char *root, const char *current, StringList *py_files, StringList *json_files) {
     DIR *dir = opendir(current);
     if (!dir) return;
 
@@ -118,13 +117,17 @@ void collect_py_files(const char *root, const char *current, StringList *files) 
         struct stat st;
         if (stat(full_path, &st) == 0) {
             if (S_ISDIR(st.st_mode)) {
-                collect_py_files(root, full_path, files);
+                collect_files(root, full_path, py_files, json_files);  // 递归
             } else if (S_ISREG(st.st_mode)) {
-                size_t len = strlen(entry->d_name);
-                if (len > 3 && strcmp(entry->d_name + len - 3, ".py") == 0) {
-                    const char *rel = full_path + strlen(root);
-                    if (*rel == '/') rel++;
-                    list_push(files, rel);
+                const char *name = entry->d_name;
+                size_t len = strlen(name);
+                const char *rel = full_path + strlen(root);
+                if (*rel == '/') rel++;
+
+                if (len > 3 && strcmp(name + len - 3, ".py") == 0) {
+                    list_push(py_files, rel);
+                } else if (len > 5 && strcmp(name + len - 5, ".json") == 0) {
+                    list_push(json_files, rel);
                 }
             }
         }
@@ -150,6 +153,31 @@ char *read_file(const char *filename) {
     buffer[size] = '\0';
     fclose(fp);
     return buffer;
+}
+
+// copy file
+int copy_file(const char *src, const char *dst) {
+    FILE *in = fopen(src, "rb");
+    if (!in) return -1;
+
+    FILE *out = fopen(dst, "wb");
+    if (!out) {
+        fclose(in);
+        return -1;
+    }
+    
+    char buffer[8192];
+    size_t bytes;
+    while ((bytes = fread(buffer, 1, sizeof(buffer), in)) > 0) {
+        if (fwrite(buffer, 1, bytes, out) != bytes) {
+            fclose(in); fclose(out);
+            return -1;
+        }
+    }
+    
+    fclose(in);
+    fclose(out);
+    return 0;
 }
 
 int run_command(const char *cmd) {
@@ -272,7 +300,7 @@ int main(int argc, const char * argv[]) {
         const char *arg = argv[i];
         if (strcmp(arg, "-p") == 0 && i + 1 < argc) {
             platform = argv[++i];
-            if (strcmp(platform, "linux") != 0 && strcmp(platform, "mac") != 0) {
+            if (strcmp(platform, "linux") != 0 && strcmp(platform, "linux-x86_64") != 0 && strcmp(platform, "linux-arm64") != 0) {
                 fprintf(stderr, "❌ Error: Invalid platform '%s'. Use 'mac' or 'linux'.\n", platform);
                 return 1;
             }
@@ -315,12 +343,15 @@ int main(int argc, const char * argv[]) {
 
     StringList py_files;
     list_init(&py_files);
+    
+    StringList json_files;
+    list_init(&json_files);
 
     int is_single_file = 0;
     char *single_file_path = NULL;
 
     if (S_ISDIR(input_stat.st_mode)) {
-        collect_py_files(abs_input, abs_input, &py_files);
+        collect_files(abs_input, abs_input, &py_files, &json_files);
         if (py_files.count == 0) {
             fprintf(stderr, "❌ No .py files found in: %s\n", abs_input);
             goto cleanup_list;
@@ -382,7 +413,7 @@ int main(int argc, const char * argv[]) {
                 openssl_root,
                 openssl_root,
                 mk_runtime_dir);
-        } else if (strcmp(platform, "linux") == 0) {
+        } else if (strcmp(platform, "linux-x86_64") == 0) {
             snprintf(compile_cmd, cmd_len,
                 "/usr/local/bin/docker run --rm "
                 "-v \"%s:/workspace\" "
@@ -391,6 +422,23 @@ int main(int argc, const char * argv[]) {
                 "mk_python3.11_obfuscated_linux_x86_64 "
                 "gcc -shared -fPIC "
                     "-I/usr/local/include/python3.11 "
+                    "-I/openssl/include "
+                    "-L/openssl/lib "
+                    "-o /output/mk_runtime.so "
+                    "/workspace/mk_runtime.c "
+                    "-lcrypto",
+                runtime_dir,
+                openssl_root,
+                mk_runtime_dir);
+        } else if (strcmp(platform, "linux-arm64") == 0) {
+            snprintf(compile_cmd, cmd_len,
+                "/usr/local/bin/docker run --rm "
+                "-v \"%s:/workspace\" "
+                "-v \"%s/OpenSSL/openssl-linux:/openssl:ro\" "
+                "-v \"%s:/output\" "
+                "mk_python3.11_obfuscated_linux_aarch64 "
+                "gcc -shared -fPIC "
+                    "-I/usr/include/python3.11 "
                     "-I/openssl/include "
                     "-L/openssl/lib "
                     "-o /output/mk_runtime.so "
@@ -670,27 +718,54 @@ int main(int argc, const char * argv[]) {
         
         fprintf(out, "# PyObfusc -%s , %s\n", version, time_str);
         // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-//        fprintf(out, "from %s import __run_protected__\n", import_path);
-//        fprintf(out, "parameter = b'");
-//        for (Py_ssize_t j = 0; j < (Py_ssize_t)encrypted_len; j++) {
-//            fprintf(out, "\\x%02x", (unsigned char)encrypted_data[j]);
-//        }
-//        fprintf(out, "'\n");
-//        fprintf(out, "__run_protected__(__name__, __file__, parameter)\n");
-//        fclose(out);
-        // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
         fprintf(out, "from %s import __run_protected__\n", import_path);
-        fprintf(out, "__run_protected__(__name__, __file__, b'");
+        fprintf(out, "parameter = b'");
         for (Py_ssize_t j = 0; j < (Py_ssize_t)encrypted_len; j++) {
             fprintf(out, "\\x%02x", (unsigned char)encrypted_data[j]);
         }
-        fprintf(out, "')\n");
+        fprintf(out, "'\n");
+        fprintf(out, "__run_protected__(__name__, __file__, parameter)\n");
         fclose(out);
+        // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+//        fprintf(out, "from %s import __run_protected__\n", import_path);
+//        fprintf(out, "__run_protected__(__name__, __file__, b'");
+//        for (Py_ssize_t j = 0; j < (Py_ssize_t)encrypted_len; j++) {
+//            fprintf(out, "\\x%02x", (unsigned char)encrypted_data[j]);
+//        }
+//        fprintf(out, "')\n");
+//        fclose(out);
         // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
         free(encrypted_data);
         free(input_file);
         free(out_file);
         free(out_dir);
+    }
+    
+    // Copy .json files directly
+    for (size_t i = 0; i < json_files.count; ++i) {
+        const char *rel_path = json_files.items[i];
+
+        size_t src_len = strlen(abs_input) + strlen(rel_path) + 2;
+        char *src_path = malloc(src_len);
+        snprintf(src_path, src_len, "%s/%s", abs_input, rel_path);
+
+        size_t dst_len = strlen(dist_dir) + 1 + strlen(rel_path) + 1;
+        char *dst_path = malloc(dst_len);
+        snprintf(dst_path, dst_len, "%s/%s", dist_dir, rel_path);
+
+        char *dst_dir = strdup(dst_path);
+        char *last_slash = strrchr(dst_dir, '/');
+        if (last_slash) *last_slash = '\0';
+        mkdir_p(dst_dir);
+
+        printf("📄 Copying JSON: %s\n", rel_path);
+        if (copy_file(src_path, dst_path) != 0) {
+            fprintf(stderr, "❌ Failed to copy JSON file: %s\n", src_path);
+        }
+
+        free(src_path);
+        free(dst_path);
+        free(dst_dir);
     }
 
     Py_Finalize();
@@ -698,6 +773,7 @@ int main(int argc, const char * argv[]) {
 
 cleanup_list:
     list_free(&py_files);
+    list_free(&json_files);
     if (mk_runtime_dir) {
         free(mk_runtime_dir);
     }

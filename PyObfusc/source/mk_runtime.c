@@ -91,24 +91,24 @@ __run_protected__(PyObject *self, PyObject *args)
     }
     
     // >>>>>>>>>>>>>>>>>> DEBUG LOGS <<<<<<<<<<<<<<<<<<
-    fprintf(stderr, "[MK_RUNTIME] module_name = '%s'\n", module_name ? module_name : "(null)");
-    fprintf(stderr, "[MK_RUNTIME] file_path   = '%s'\n", file_path ? file_path : "(null)");
-    
-    if (file_path) {
-        if (access(file_path, F_OK) == 0) {
-            fprintf(stderr, "[MK_RUNTIME] file_path EXISTS on disk.\n");
-        } else {
-            fprintf(stderr, "[MK_RUNTIME] file_path DOES NOT EXIST! errno=%d (%s)\n", errno, strerror(errno));
-        }
-    }
-
-    char cwd_buf[1024];
-    if (getcwd(cwd_buf, sizeof(cwd_buf))) {
-        fprintf(stderr, "[MK_RUNTIME] current working directory = '%s'\n", cwd_buf);
-    } else {
-        fprintf(stderr, "[MK_RUNTIME] failed to get cwd\n");
-    }
-    fflush(stderr);
+//    fprintf(stderr, "[MK_RUNTIME] module_name = '%s'\n", module_name ? module_name : "(null)");
+//    fprintf(stderr, "[MK_RUNTIME] file_path   = '%s'\n", file_path ? file_path : "(null)");
+//
+//    if (file_path) {
+//        if (access(file_path, F_OK) == 0) {
+//            fprintf(stderr, "[MK_RUNTIME] file_path EXISTS on disk.\n");
+//        } else {
+//            fprintf(stderr, "[MK_RUNTIME] file_path DOES NOT EXIST! errno=%d (%s)\n", errno, strerror(errno));
+//        }
+//    }
+//
+//    char cwd_buf[1024];
+//    if (getcwd(cwd_buf, sizeof(cwd_buf))) {
+//        fprintf(stderr, "[MK_RUNTIME] current working directory = '%s'\n", cwd_buf);
+//    } else {
+//        fprintf(stderr, "[MK_RUNTIME] failed to get cwd\n");
+//    }
+//    fflush(stderr);
     // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
     // >>>>>>>>>>>>>>>>>>> AES decrypt <<<<<<<<<<<<<<<<<<<<<
