@@ -367,13 +367,8 @@ int main(int argc, const char * argv[]) {
         single_file_path = abs_input;
     }
 
-    char *dist_dir;
-    if (is_single_file) {
-        dist_dir = dist_parent;
-    } else {
-        size_t dir_len = strlen(dist_parent) + strlen("/") + strlen(input_basename) + 1;
-        dist_dir = (char *)malloc(dir_len);
-        snprintf(dist_dir, dir_len, "%s/%s", dist_parent, input_basename);
+    char *dist_dir = dist_parent;
+    if (!is_single_file) {
         mkdir_p(dist_dir);
     }
 
@@ -779,9 +774,6 @@ cleanup_list:
     }
     if (!is_single_file) {
         free(abs_input);
-        if (dist_dir != dist_parent) {
-            free(dist_dir);
-        }
     }
     free(input_dir_dup);
     free(input_parent_dup);
