@@ -10,11 +10,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 #include <unistd.h>
 #include <libgen.h>
+#include <limits.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <dirent.h>
+#include <mach-o/dyld.h>
 #include <cpython/code.h>
 #include <opcode.h>
 #include "mk_print.h"
@@ -274,6 +277,266 @@ char *concat(const char *s1, const char *s2) {
     return result;
 }
 
+static int is_valid_platform(const char *platform) {
+    return platform
+        && (strcmp(platform, "mac") == 0
+            || strcmp(platform, "linux-x86_64") == 0
+            || strcmp(platform, "linux-arm64") == 0);
+}
+
+static char *format_cmd(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    va_list aq;
+    va_copy(aq, ap);
+    int needed = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    if (needed < 0) {
+        va_end(aq);
+        return NULL;
+    }
+    char *buf = (char *)malloc((size_t)needed + 1);
+    if (!buf) {
+        va_end(aq);
+        return NULL;
+    }
+    vsnprintf(buf, (size_t)needed + 1, fmt, aq);
+    va_end(aq);
+    return buf;
+}
+
+static char *join_path(const char *a, const char *b) {
+    if (!a || !b) return NULL;
+    size_t la = strlen(a);
+    int need_slash = (la > 0 && a[la - 1] != '/');
+    size_t n = la + strlen(b) + (need_slash ? 2 : 1);
+    char *out = (char *)malloc(n);
+    if (!out) return NULL;
+    if (need_slash) snprintf(out, n, "%s/%s", a, b);
+    else snprintf(out, n, "%s%s", a, b);
+    return out;
+}
+
+// Installed layout: <root>/bin/pyobfusc. A binary built in DerivedData
+// falls back to the source tree that contains source/mk_runtime.c.
+static char *tool_root(void) {
+    char buf[PATH_MAX];
+    uint32_t size = (uint32_t)sizeof(buf);
+    if (_NSGetExecutablePath(buf, &size) == 0) {
+        char *exe = realpath(buf, NULL);
+        if (exe) {
+            char *exe_copy = strdup(exe);
+            char *dir = dirname(exe_copy);
+            char *dir_copy = strdup(dir);
+            char *base = basename(dir_copy);
+            char *root = NULL;
+            if (strcmp(base, "bin") == 0) {
+                char *dir_for_parent = strdup(dir);
+                root = strdup(dirname(dir_for_parent));
+                free(dir_for_parent);
+            }
+            free(dir_copy);
+            free(exe_copy);
+            free(exe);
+            if (root) return root;
+        }
+    }
+
+    char *runtime_copy = strdup(fixed_runtime_path);
+    char *source_dir = dirname(runtime_copy);
+    char *source_copy = strdup(source_dir);
+    char *root = strdup(dirname(source_copy));
+    free(source_copy);
+    free(runtime_copy);
+    return root;
+}
+
+static void print_help(const char *root) {
+    const char *shown = root ? root : "(未知)";
+    printf(
+        "pyobfusc %s — 把 Python 源码加密成可运行的受保护脚本\n"
+        "\n"
+        "用法:\n"
+        "  pyobfusc [选项] <输入路径>\n"
+        "\n"
+        "参数:\n"
+        "  <输入路径>              一个 .py 文件，或一个包含 .py 的目录\n"
+        "\n"
+        "选项:\n"
+        "  -p, --platform <平台>   运行时所针对的系统。默认: mac\n"
+        "                          mac            使用预编译的 mac 版 mk_runtime.so\n"
+        "                          linux-x86_64   使用预编译的 linux x86_64 版 mk_runtime.so\n"
+        "                          linux-arm64    使用预编译的 linux arm64 版 mk_runtime.so\n"
+        "  --build-runtime         预编译 mk_runtime.so。不带 -p 时编译全部平台\n"
+        "  -h, --help              显示这份说明\n"
+        "  -V, --version           显示版本\n"
+        "\n"
+        "行为:\n"
+        "  输出目录是输入路径的上一级里的 dist/，已有的 dist/ 会先整目录删除。\n"
+        "  目录输入时，其中的 .py 会被加密，.json 会原样复制，并生成 dist/mk_runtime/。\n"
+        "  单个 .py 文件时，加密结果写到该文件所在目录的 dist/ 下。\n"
+        "  加密后的 .py 通过 mk_runtime.__run_protected__ 在对应平台上运行。\n"
+        "\n"
+        "示例:\n"
+        "  pyobfusc ./src\n"
+        "  pyobfusc -p mac /Users/liaoyu/Desktop/fs-ai-chat/fs-iqa-db/src\n"
+        "  pyobfusc -p linux-x86_64 /Users/liaoyu/Desktop/fs-ai-chat/fs-iqa-db/src\n"
+        "  pyobfusc --platform linux-arm64 ./app.py\n"
+        "\n"
+        "运行时:\n"
+        "  mk_runtime.so 在安装或执行 --build-runtime 时按平台预编译，放在\n"
+        "  %s/runtime/<平台>/\n"
+        "  加密时只复制对应平台的 .so 和 __init__.py，不会调用 clang，也不会启动 Docker。\n"
+        "\n"
+        "  pyobfusc --build-runtime              预编译 mac、linux-x86_64、linux-arm64\n"
+        "  pyobfusc --build-runtime -p mac       只预编译某一个平台\n"
+        "\n"
+        "  --build-runtime 编 Linux 运行时才需要 Docker 镜像：\n"
+        "    mk_python3.11_obfuscated_linux_x86_64\n"
+        "    mk_python3.11_obfuscated_linux_aarch64\n"
+        "\n"
+        "依赖:\n"
+        "  加密本身需要 /Library/Frameworks 里的 Python 3.11。\n"
+        "  mac 运行时的预编译还需要 clang。\n"
+        "  Linux 运行时的预编译还需要上面的 Docker 镜像。\n",
+        version, shown);
+}
+
+static int write_runtime_init(const char *root) {
+    char *runtime_dir = join_path(root, "runtime");
+    if (!runtime_dir) return 1;
+    mkdir_p(runtime_dir);
+    char *init_path = join_path(runtime_dir, "__init__.py");
+    free(runtime_dir);
+    if (!init_path) return 1;
+    FILE *fp = fopen(init_path, "w");
+    if (!fp) {
+        fprintf(stderr, "❌ 无法写入 %s\n", init_path);
+        free(init_path);
+        return 1;
+    }
+    fputs("from .mk_runtime import __run_protected__\n", fp);
+    fclose(fp);
+    free(init_path);
+    return 0;
+}
+
+static int build_one_runtime(const char *root, const char *platform) {
+    char *source_dir = join_path(root, "source");
+    char *source_file = source_dir ? join_path(source_dir, "mk_runtime.c") : NULL;
+    char *openssl_mac_include = join_path(root, "OpenSSL/openssl-mac/include");
+    char *openssl_mac_crypto = join_path(root, "OpenSSL/openssl-mac/lib/libcrypto.a");
+    char *openssl_linux = join_path(root, "OpenSSL/openssl-linux");
+    char *out_dir = join_path(root, "runtime");
+    char *plat_dir = out_dir ? join_path(out_dir, platform) : NULL;
+    char *out_so = plat_dir ? join_path(plat_dir, "mk_runtime.so") : NULL;
+    char *cmd = NULL;
+    int rc = 1;
+
+    if (!source_file || !file_exists(source_file)) {
+        fprintf(stderr, "❌ 找不到 mk_runtime.c: %s\n", source_file ? source_file : "(null)");
+        goto done;
+    }
+    if (!plat_dir || !out_so) goto done;
+    mkdir_p(plat_dir);
+    if (write_runtime_init(root) != 0) goto done;
+
+    if (strcmp(platform, "mac") == 0) {
+        if (!openssl_mac_crypto || !file_exists(openssl_mac_crypto)) {
+            fprintf(stderr, "❌ 找不到 libcrypto.a: %s\n", openssl_mac_crypto ? openssl_mac_crypto : "(null)");
+            goto done;
+        }
+        cmd = format_cmd(
+            "clang -shared -fPIC "
+            "-I\"%s\" "
+            "-I/Library/Frameworks/Python.framework/Versions/3.11/include/python3.11 "
+            "-I\"%s\" "
+            "-o \"%s\" "
+            "\"%s\" "
+            "\"%s\" "
+            "-undefined dynamic_lookup",
+            source_dir,
+            openssl_mac_include,
+            out_so,
+            source_file,
+            openssl_mac_crypto);
+    } else if (strcmp(platform, "linux-x86_64") == 0 || strcmp(platform, "linux-arm64") == 0) {
+        const char *image = strcmp(platform, "linux-x86_64") == 0
+            ? "mk_python3.11_obfuscated_linux_x86_64"
+            : "mk_python3.11_obfuscated_linux_aarch64";
+        const char *py_include = strcmp(platform, "linux-x86_64") == 0
+            ? "/usr/local/include/python3.11"
+            : "/usr/include/python3.11";
+        if (!openssl_linux || !file_exists(openssl_linux)) {
+            fprintf(stderr, "❌ 找不到 OpenSSL linux 目录: %s\n", openssl_linux ? openssl_linux : "(null)");
+            goto done;
+        }
+        const char *crypto_a = strcmp(platform, "linux-x86_64") == 0
+            ? "/openssl/lib64/libcrypto.a"
+            : "/usr/lib/aarch64-linux-gnu/libcrypto.a";
+        const char *openssl_include = strcmp(platform, "linux-x86_64") == 0
+            ? "-I/openssl/include"
+            : "-I/usr/include";
+        const char *docker_platform = strcmp(platform, "linux-x86_64") == 0
+            ? "linux/amd64"
+            : "linux/arm64";
+        cmd = format_cmd(
+            "/usr/local/bin/docker run --rm --platform %s "
+            "-v \"%s:/workspace:ro\" "
+            "-v \"%s:/openssl:ro\" "
+            "-v \"%s:/output\" "
+            "%s "
+            "gcc -shared -fPIC "
+            "-I%s "
+            "%s "
+            "-o /output/mk_runtime.so "
+            "/workspace/mk_runtime.c "
+            "%s "
+            "-lpthread -ldl",
+            docker_platform,
+            source_dir,
+            openssl_linux,
+            plat_dir,
+            image,
+            py_include,
+            openssl_include,
+            crypto_a);
+    }
+
+    if (!cmd) goto done;
+    printf("📦 预编译 mk_runtime.so (%s) -> %s\n", platform, out_so);
+    fflush(stdout);
+    if (run_command(cmd) != 0) {
+        fprintf(stderr, "❌ 预编译失败: %s\n", platform);
+        goto done;
+    }
+    rc = 0;
+
+done:
+    free(cmd);
+    free(source_dir);
+    free(source_file);
+    free(openssl_mac_include);
+    free(openssl_mac_crypto);
+    free(openssl_linux);
+    free(out_dir);
+    free(plat_dir);
+    free(out_so);
+    return rc;
+}
+
+static int build_runtime(const char *root, const char *platform, int platform_set) {
+    if (platform_set) {
+        return build_one_runtime(root, platform);
+    }
+    const char *all[] = {"mac", "linux-x86_64", "linux-arm64"};
+    int failed = 0;
+    for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); ++i) {
+        if (build_one_runtime(root, all[i]) != 0) failed = 1;
+    }
+    return failed;
+}
+
 // frozen
 char *make_frozen_filename(const char *filename) {
     if (!filename) return NULL;
@@ -288,30 +551,79 @@ char *make_frozen_filename(const char *filename) {
 
 // ==================== Main ====================
 int main(int argc, const char * argv[]) {
-    if (argc < 2) {
-        fprintf(stderr, "There are too few argv.");
-        return 1;
-    }
-    
     const char *input_path = NULL;
-    const char *platform = "mac"; // The default platform is Mac
-    // get parameters
+    const char *platform = "mac";
+    int platform_set = 0;
+    int want_help = 0;
+    int want_version = 0;
+    int want_build_runtime = 0;
+
     for (int i = 1; i < argc; ++i) {
         const char *arg = argv[i];
-        if (strcmp(arg, "-p") == 0 && i + 1 < argc) {
-            platform = argv[++i];
-            if (strcmp(platform, "linux") != 0 && strcmp(platform, "linux-x86_64") != 0 && strcmp(platform, "linux-arm64") != 0) {
-                fprintf(stderr, "❌ Error: Invalid platform '%s'. Use 'mac' or 'linux'.\n", platform);
+        if (strcmp(arg, "-h") == 0 || strcmp(arg, "--help") == 0) {
+            want_help = 1;
+        } else if (strcmp(arg, "-V") == 0 || strcmp(arg, "--version") == 0) {
+            want_version = 1;
+        } else if (strcmp(arg, "--build-runtime") == 0) {
+            want_build_runtime = 1;
+        } else if (strcmp(arg, "-p") == 0 || strcmp(arg, "--platform") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "❌ %s 需要一个平台参数。查看用法: pyobfusc --help\n", arg);
                 return 1;
             }
+            platform = argv[++i];
+            platform_set = 1;
+            if (!is_valid_platform(platform)) {
+                fprintf(stderr, "❌ 非法平台 '%s'。可选: mac、linux-x86_64、linux-arm64。\n", platform);
+                return 1;
+            }
+        } else if (strncmp(arg, "--platform=", 11) == 0) {
+            platform = arg + 11;
+            platform_set = 1;
+            if (!is_valid_platform(platform)) {
+                fprintf(stderr, "❌ 非法平台 '%s'。可选: mac、linux-x86_64、linux-arm64。\n", platform);
+                return 1;
+            }
+        } else if (arg[0] == '-') {
+            fprintf(stderr, "❌ 无法识别的参数: %s\n查看用法: pyobfusc --help\n", arg);
+            return 1;
         } else if (input_path == NULL) {
             input_path = arg;
         } else {
-            fprintf(stderr, "❌ Error: Unexpected argument: %s\n", arg);
+            fprintf(stderr, "❌ 无法识别的参数: %s\n查看用法: pyobfusc --help\n", arg);
             return 1;
         }
     }
-    
+
+    if (want_help) {
+        char *root = tool_root();
+        print_help(root);
+        free(root);
+        return 0;
+    }
+    if (want_version) {
+        printf("pyobfusc %s\n", version);
+        return 0;
+    }
+    if (want_build_runtime) {
+        if (input_path) {
+            fprintf(stderr, "❌ --build-runtime 不接受输入路径。查看用法: pyobfusc --help\n");
+            return 1;
+        }
+        char *root = tool_root();
+        if (!root) {
+            fprintf(stderr, "❌ 无法定位 pyobfusc 安装目录\n");
+            return 1;
+        }
+        int rc = build_runtime(root, platform, platform_set);
+        free(root);
+        return rc;
+    }
+    if (!input_path) {
+        fprintf(stderr, "❌ 缺少输入路径。查看用法: pyobfusc --help\n");
+        return 1;
+    }
+
     if (access(input_path, F_OK) != 0) {
         fprintf(stderr, "❌ Input not found: %s\n", input_path);
         return 1;
@@ -349,17 +661,21 @@ int main(int argc, const char * argv[]) {
 
     int is_single_file = 0;
     char *single_file_path = NULL;
+    char *mk_runtime_dir = NULL;
+    int status = 0;
 
     if (S_ISDIR(input_stat.st_mode)) {
         collect_files(abs_input, abs_input, &py_files, &json_files);
         if (py_files.count == 0) {
             fprintf(stderr, "❌ No .py files found in: %s\n", abs_input);
+            status = 1;
             goto cleanup_list;
         }
     } else {
         size_t len = strlen(abs_input);
         if (len <= 3 || strcmp(abs_input + len - 3, ".py") != 0) {
             fprintf(stderr, "❌ Not a .py file: %s\n", abs_input);
+            status = 1;
             goto cleanup_list;
         }
         list_push(&py_files, input_basename);
@@ -372,99 +688,38 @@ int main(int argc, const char * argv[]) {
         mkdir_p(dist_dir);
     }
 
-    // share mk_runtime.so
-    char *mk_runtime_dir = NULL;
+    // Copy the prebuilt runtime. Encryption does not compile or start Docker.
+    char *root = tool_root();
+    char *runtime_pkg = root ? join_path(root, "runtime") : NULL;
+    char *plat_dir = runtime_pkg ? join_path(runtime_pkg, platform) : NULL;
+    char *src_so = plat_dir ? join_path(plat_dir, "mk_runtime.so") : NULL;
+    char *src_init = runtime_pkg ? join_path(runtime_pkg, "__init__.py") : NULL;
     size_t len = strlen(dist_parent) + strlen("/mk_runtime") + 1;
     mk_runtime_dir = malloc(len);
     snprintf(mk_runtime_dir, len, "%s/mk_runtime", dist_parent);
+    mkdir_p(mk_runtime_dir);
+    char *dst_so = join_path(mk_runtime_dir, "mk_runtime.so");
+    char *dst_init = join_path(mk_runtime_dir, "__init__.py");
 
-    char *so_path = malloc(strlen(mk_runtime_dir) + strlen("/mk_runtime.so") + 1);
-    snprintf(so_path, strlen(mk_runtime_dir) + strlen("/mk_runtime.so") + 1, "%s/mk_runtime.so", mk_runtime_dir);
-
-    if (!file_exists(so_path)) {
-        mkdir_p(mk_runtime_dir);
-
-        char *runtime_path = strdup(fixed_runtime_path);
-        char *dir_name = dirname(runtime_path);
-        char *runtime_dir = strdup(dir_name);
-        dir_name = dirname(runtime_dir);
-        char *openssl_root = strdup(dir_name);
-
-        size_t cmd_len = 512;
-        char *compile_cmd = malloc(cmd_len);
-
-        if (strcmp(platform, "mac") == 0) {
-            snprintf(compile_cmd, cmd_len,
-                "cd \"%s\" && "
-                "clang -shared -fPIC "
-                "-I. "
-                "-I/Library/Frameworks/Python.framework/Versions/3.11/include/python3.11 "
-                "-I\"%s/OpenSSL/openssl-mac/include\" "
-                "-L\"%s/OpenSSL/openssl-mac/lib\" "
-                "-o \"%s/mk_runtime.so\" "
-                "mk_runtime.c "
-                "-lcrypto -undefined dynamic_lookup",
-                runtime_dir,
-                openssl_root,
-                openssl_root,
-                mk_runtime_dir);
-        } else if (strcmp(platform, "linux-x86_64") == 0) {
-            snprintf(compile_cmd, cmd_len,
-                "/usr/local/bin/docker run --rm "
-                "-v \"%s:/workspace\" "
-                "-v \"%s/OpenSSL/openssl-linux:/openssl:ro\" "
-                "-v \"%s:/output\" "
-                "mk_python3.11_obfuscated_linux_x86_64 "
-                "gcc -shared -fPIC "
-                    "-I/usr/local/include/python3.11 "
-                    "-I/openssl/include "
-                    "-L/openssl/lib "
-                    "-o /output/mk_runtime.so "
-                    "/workspace/mk_runtime.c "
-                    "-lcrypto",
-                runtime_dir,
-                openssl_root,
-                mk_runtime_dir);
-        } else if (strcmp(platform, "linux-arm64") == 0) {
-            snprintf(compile_cmd, cmd_len,
-                "/usr/local/bin/docker run --rm "
-                "-v \"%s:/workspace\" "
-                "-v \"%s/OpenSSL/openssl-linux:/openssl:ro\" "
-                "-v \"%s:/output\" "
-                "mk_python3.11_obfuscated_linux_aarch64 "
-                "gcc -shared -fPIC "
-                    "-I/usr/include/python3.11 "
-                    "-I/openssl/include "
-                    "-L/openssl/lib "
-                    "-o /output/mk_runtime.so "
-                    "/workspace/mk_runtime.c "
-                    "-lcrypto",
-                runtime_dir,
-                openssl_root,
-                mk_runtime_dir);
+    if (!src_so || !file_exists(src_so) || !src_init || !file_exists(src_init)) {
+        fprintf(stderr, "❌ 未找到预编译运行时: %s\n", src_so ? src_so : platform);
+        fprintf(stderr, "请先执行: pyobfusc --build-runtime -p %s\n", platform);
+        status = 1;
+    } else {
+        printf("📦 复制运行时 (%s)\n", platform);
+        if (copy_file(src_so, dst_so) != 0 || copy_file(src_init, dst_init) != 0) {
+            fprintf(stderr, "❌ 复制 mk_runtime 失败\n");
+            status = 1;
         }
-
-        printf("📦 Compiling mk_runtime.so for: %s\n", mk_runtime_dir);
-        if (run_command(compile_cmd) != 0) {
-            fprintf(stderr, "❌ Failed to compile mk_runtime.so\n");
-            free(compile_cmd); free(runtime_path); free(runtime_dir); free(openssl_root);
-            free(so_path); free(mk_runtime_dir);
-            goto cleanup_list;
-        }
-        free(compile_cmd); free(runtime_path); free(runtime_dir); free(openssl_root);
-
-        // Write __init__.py
-        size_t init_py_len = strlen(mk_runtime_dir) + strlen("/__init__.py") + 1;
-        char *init_py_path = malloc(init_py_len);
-        snprintf(init_py_path, init_py_len, "%s/__init__.py", mk_runtime_dir);
-        FILE* init_py = fopen(init_py_path, "w");
-        if (init_py) {
-            fputs("from .mk_runtime import __run_protected__\n", init_py);
-            fclose(init_py);
-        }
-        free(init_py_path);
     }
-    free(so_path);
+    free(root);
+    free(runtime_pkg);
+    free(plat_dir);
+    free(src_so);
+    free(src_init);
+    free(dst_so);
+    free(dst_init);
+    if (status != 0) goto cleanup_list;
     //
     Py_Initialize();
 
@@ -778,5 +1033,5 @@ cleanup_list:
     free(input_dir_dup);
     free(input_parent_dup);
     free(dist_parent);
-    return 0;
+    return status;
 }
